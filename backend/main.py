@@ -9,7 +9,6 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
-
 from google import genai
 
 # Load environment variables
@@ -17,7 +16,7 @@ load_dotenv()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 if not GEMINI_API_KEY:
-  raise RuntimeError("GEMINI_API_KEY is not set in environment or .env")
+    raise RuntimeError("GEMINI_API_KEY is not set in environment or .env")
 
 # Gemini client
 client = genai.Client(api_key=GEMINI_API_KEY)
@@ -25,10 +24,15 @@ client = genai.Client(api_key=GEMINI_API_KEY)
 # FastAPI app
 app = FastAPI(title="AI Feedback Backend")
 
-# CORS (for local dev & deployment)
+# ✅ CORS configuration (ONLY ONCE)
+origins = [
+    "http://localhost:5173",                # local frontend
+    "https://test1-lake-six.vercel.app",    # your Vercel frontend URL
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # you can restrict to specific front-end origin later
+    allow_origins=origins,          # only these origins
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
