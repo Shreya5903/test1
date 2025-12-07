@@ -5,45 +5,53 @@ import re
 from datetime import datetime
 from typing import List
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 from google import genai
 
-# Load environment variables
+# -------------------------
+# Environment & Gemini setup
+# -------------------------
+
 load_dotenv()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 if not GEMINI_API_KEY:
     raise RuntimeError("GEMINI_API_KEY is not set in environment or .env")
 
-# Gemini client
 client = genai.Client(api_key=GEMINI_API_KEY)
 
-# FastAPI app
+# -------------------------
+# FastAPI app + CORS
+# -------------------------
+
 app = FastAPI(title="AI Feedback Backend")
 
-# ✅ CORS configuration (ONLY ONCE)
-origins = [
-    "http://localhost:5173",                # local frontend
-    "https://test1-lake-six.vercel.app",    # your Vercel frontend URL
-]
-
+# Simple, robust CORS: allow all origins.
+# (No cookies / auth, so this is safe for your use case.)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,          # only these origins
-    allow_credentials=True,
+    allow_origins=["*"],      # allow all frontends (Vercel, localhost, etc.)
+    allow_credentials=False,  # must be False when using "*"
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+# -------------------------
 # SQLite setup
+# -------------------------
+
 DB_PATH = "reviews.db"
 conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-cursor = conn.cursor()
 
-cursor.execute(
+# Improve concurrency & avoid "database is locked" issues
+conn.execute("PRAGMA journal_mode=WAL;")
+conn.execute("PRAGMA busy_timeout = 5000;")  # wait up to 5 seconds if locked
+
+init_cursor = conn.cursor()
+init_cursor.execute(
     """
     CREATE TABLE IF NOT EXISTS reviews (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -59,6 +67,10 @@ cursor.execute(
 )
 conn.commit()
 
+
+# -------------------------
+# Pydantic models
+# -------------------------
 
 class ReviewCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=100)
@@ -76,6 +88,10 @@ class ReviewOut(BaseModel):
     ai_summary: str
     ai_actions: str
 
+
+# -------------------------
+# Gemini helper
+# -------------------------
 
 def generate_ai_feedback(rating: int, review_text: str) -> dict:
     """
@@ -119,22 +135,47 @@ Important:
         summary = data.get("summary") or "User shared their experience with the product."
         actions = data.get("actions") or "- Review this feedback with the team."
 
+        # 🔑 Normalize to strings so SQLite accepts them
+        if isinstance(user_response, list):
+            user_response = " ".join(str(x) for x in user_response)
+        else:
+            user_response = str(user_response)
+
+        if isinstance(summary, list):
+            summary = " ".join(str(x) for x in summary)
+        else:
+            summary = str(summary)
+
+        # actions might be a list of bullet points – join them with newlines
+        if isinstance(actions, list):
+            actions = "\n".join(str(x) for x in actions)
+        else:
+            actions = str(actions)
+
         return {
             "user_response": user_response,
             "summary": summary,
-            "actions": actions
+            "actions": actions,
         }
 
     except Exception as e:
         # Fallback if JSON parsing or API fails
         print("Gemini error:", e)
-        fallback_actions = "- Review this feedback.\n- Consider reaching out to the user.\n- Check if similar feedback exists."
+        fallback_actions = (
+            "- Review this feedback.\n"
+            "- Consider reaching out to the user.\n"
+            "- Check if similar feedback exists."
+        )
         return {
             "user_response": "Thank you for your feedback! Our team will review it.",
             "summary": "User shared feedback about their experience.",
-            "actions": fallback_actions
+            "actions": fallback_actions,
         }
 
+
+# -------------------------
+# Endpoints
+# -------------------------
 
 @app.get("/health")
 def health_check():
@@ -146,9 +187,19 @@ def create_review(review: ReviewCreate):
     ai_data = generate_ai_feedback(review.rating, review.review_text)
     created_at = datetime.utcnow().isoformat() + "Z"
 
-    cursor.execute(
+    # fresh cursor for this request
+    cur = conn.cursor()
+    cur.execute(
         """
-        INSERT INTO reviews (created_at, name, rating, review_text, ai_user_response, ai_summary, ai_actions)
+        INSERT INTO reviews (
+            created_at,
+            name,
+            rating,
+            review_text,
+            ai_user_response,
+            ai_summary,
+            ai_actions
+        )
         VALUES (?, ?, ?, ?, ?, ?, ?)
         """,
         (
@@ -162,7 +213,7 @@ def create_review(review: ReviewCreate):
         ),
     )
     conn.commit()
-    review_id = cursor.lastrowid
+    review_id = cur.lastrowid
 
     return ReviewOut(
         id=review_id,
@@ -178,14 +229,23 @@ def create_review(review: ReviewCreate):
 
 @app.get("/reviews", response_model=List[ReviewOut])
 def list_reviews():
-    cursor.execute(
+    cur = conn.cursor()
+    cur.execute(
         """
-        SELECT id, created_at, name, rating, review_text, ai_user_response, ai_summary, ai_actions
+        SELECT
+            id,
+            created_at,
+            name,
+            rating,
+            review_text,
+            ai_user_response,
+            ai_summary,
+            ai_actions
         FROM reviews
         ORDER BY datetime(created_at) DESC
         """
     )
-    rows = cursor.fetchall()
+    rows = cur.fetchall()
 
     result: List[ReviewOut] = []
     for row in rows:
